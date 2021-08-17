@@ -442,6 +442,23 @@ static void __inode_add_lru(struct inode *inode, bool rotate)
 }
 
 /*
+ * This is a temporary dumb marker to indicate that the following shadow inode
+ * protection patches are applied:
+ *
+ *   https://lore.kernel.org/linux-fsdevel/20210614211904.14420-4-hannes@cmpxchg.org/
+ */
+#include <linux/moduleparam.h>
+static int param_get_shadow_inode_prot(char *buffer, const struct kernel_param *kp)
+{
+	(void)__inode_add_lru;	/* this function doesn't exist before the patches */
+	return scnprintf(buffer, PAGE_SIZE, "1\n");
+}
+static const struct kernel_param_ops param_ops_shadow_inode_prot = {
+	.get = param_get_shadow_inode_prot,
+};
+module_param_cb(__SHADOW_INODE_PROT_MARKER__, &param_ops_shadow_inode_prot, NULL, 0444);
+
+/*
  * Add inode to LRU if needed (inode is unused and clean).
  *
  * Needs inode->i_lock held.
