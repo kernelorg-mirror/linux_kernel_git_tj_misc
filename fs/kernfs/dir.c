@@ -483,7 +483,7 @@ static bool kernfs_drain(struct kernfs_node *kn)
 	 * worrying about draining.
 	 */
 	if (atomic_read(&kn->active) == KN_DEACTIVATED_BIAS &&
-	    kernfs_should_drain_open_files(kn))
+	    !kernfs_should_drain_open_files(kn))
 		return false;
 
 	up_write(&root->kernfs_rwsem);
@@ -1321,14 +1321,15 @@ static struct kernfs_node *kernfs_next_descendant_post(struct kernfs_node *pos,
 }
 
 /**
- * kernfs_activate - activate a node which started deactivated
+ * kernfs_activate - activate a node's subtree
  * @kn: kernfs_node whose subtree is to be activated
  *
- * If the root has KERNFS_ROOT_CREATE_DEACTIVATED set, a newly created node
- * needs to be explicitly activated.  A node which hasn't been activated
- * isn't visible to userland and deactivation is skipped during its
- * removal.  This is useful to construct atomic init sequences where
- * creation of multiple nodes should either succeed or fail atomically.
+ * If newly created on a root w/ %KERNFS_ROOT_CREATE_DEACTIVATED or after a
+ * kernfs_deactivate() call, @kn is deactivated and invisible to userland. This
+ * function activates all nodes in @kn's inclusive subtree making them visible.
+ *
+ * %KERNFS_ROOT_CREATE_DEACTIVATED is useful when constructing init sequences
+ * where creation of multiple nodes should either succeed or fail atomically.
  *
  * The caller is responsible for ensuring that this function is not called
  * after kernfs_remove*() is invoked on @kn.
@@ -1342,7 +1343,7 @@ void kernfs_activate(struct kernfs_node *kn)
 
 	pos = NULL;
 	while ((pos = kernfs_next_descendant_post(pos, kn))) {
-		if (pos->flags & KERNFS_ACTIVATED)
+		if (kernfs_active(pos) || (kn->flags & KERNFS_REMOVING))
 			continue;
 
 		WARN_ON_ONCE(pos->parent && RB_EMPTY_NODE(&pos->rb));
@@ -1352,6 +1353,58 @@ void kernfs_activate(struct kernfs_node *kn)
 		pos->flags |= KERNFS_ACTIVATED;
 	}
 
+	up_write(&root->kernfs_rwsem);
+}
+
+static void kernfs_deactivate_locked(struct kernfs_node *kn, bool removing)
+{
+	struct kernfs_root *root = kernfs_root(kn);
+	struct kernfs_node *pos;
+
+	lockdep_assert_held_write(&root->kernfs_rwsem);
+
+	/* prevent any new usage under @kn by deactivating all nodes */
+	pos = NULL;
+	while ((pos = kernfs_next_descendant_post(pos, kn))) {
+		if (kernfs_active(pos))
+			atomic_add(KN_DEACTIVATED_BIAS, &pos->active);
+		if (removing)
+			pos->flags |= KERNFS_REMOVING;
+	}
+
+	/*
+	 * No new active usage can be created. Drain existing ones. As
+	 * kernfs_drain() may drop kernfs_rwsem temporarily, pin @pos so that it
+	 * doesn't go away underneath us.
+	 *
+	 * If kernfs_rwsem was released, restart from the beginning. Forward
+	 * progress is guaranteed as a drained node is guaranteed to stay
+	 * drained. In the unlikely case that the loop restart ever becomes a
+	 * problem, we should be able to work around by batching up the
+	 * draining.
+	 */
+	pos = NULL;
+	while ((pos = kernfs_next_descendant_post(pos, kn))) {
+		kernfs_get(pos);
+		if (kernfs_drain(pos))
+			pos = NULL;
+		kernfs_put(pos);
+	}
+}
+
+/**
+ * kernfs_deactivate - deactivate a node's subtree
+ * @kn: kernfs_node whose subtree is to be deactivated
+ *
+ * Deactivate @kn's inclusive subtree. On return, the subtree is invisible to
+ * userland and there are no in-flight file operations.
+ */
+void kernfs_deactivate(struct kernfs_node *kn)
+{
+	struct kernfs_root *root = kernfs_root(kn);
+
+	down_write(&root->kernfs_rwsem);
+	kernfs_deactivate_locked(kn, false);
 	up_write(&root->kernfs_rwsem);
 }
 
@@ -1374,25 +1427,11 @@ static void __kernfs_remove(struct kernfs_node *kn)
 
 	pr_debug("kernfs %s: removing\n", kn->name);
 
-	/* prevent any new usage under @kn by deactivating all nodes */
-	pos = NULL;
-	while ((pos = kernfs_next_descendant_post(pos, kn)))
-		if (kernfs_active(pos))
-			atomic_add(KN_DEACTIVATED_BIAS, &pos->active);
+	kernfs_deactivate_locked(kn, true);
 
-	/* deactivate and unlink the subtree node-by-node */
+	/* unlink the subtree node-by-node */
 	do {
 		pos = kernfs_leftmost_descendant(kn);
-
-		/*
-		 * kernfs_drain() may drop kernfs_rwsem temporarily and @pos's
-		 * base ref could have been put by someone else by the time
-		 * the function returns.  Make sure it doesn't go away
-		 * underneath us.
-		 */
-		kernfs_get(pos);
-
-		kernfs_drain(pos);
 
 		/*
 		 * kernfs_unlink_sibling() succeeds once per node.  Use it
@@ -1410,8 +1449,6 @@ static void __kernfs_remove(struct kernfs_node *kn)
 
 			kernfs_put(pos);
 		}
-
-		kernfs_put(pos);
 	} while (pos != kn);
 }
 

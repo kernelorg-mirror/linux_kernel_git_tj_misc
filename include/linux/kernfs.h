@@ -112,6 +112,7 @@ enum kernfs_node_flag {
 	KERNFS_SUICIDED		= 0x0800,
 	KERNFS_EMPTY_DIR	= 0x1000,
 	KERNFS_HAS_RELEASE	= 0x2000,
+	KERNFS_REMOVING		= 0x4000,
 };
 
 /* @flags for kernfs_create_root() */
@@ -429,6 +430,7 @@ struct kernfs_node *kernfs_create_link(struct kernfs_node *parent,
 				       const char *name,
 				       struct kernfs_node *target);
 void kernfs_activate(struct kernfs_node *kn);
+void kernfs_deactivate(struct kernfs_node *kn);
 void kernfs_remove(struct kernfs_node *kn);
 void kernfs_break_active_protection(struct kernfs_node *kn);
 void kernfs_unbreak_active_protection(struct kernfs_node *kn);
