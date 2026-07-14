@@ -647,7 +647,14 @@ static bool regsafe(struct bpf_verifier_env *env, struct bpf_reg_state *rold,
 		 */
 		return regs_exact(rold, rcur, idmap) && rold->frameno == rcur->frameno;
 	case PTR_TO_ARENA:
-		return true;
+		/*
+		 * The null-tracking ids of maybe-null arena pointers must
+		 * correspond like any other null-capable type, or a path
+		 * that has not NULL-checked a pointer could prune against
+		 * one that has. Plain arena pointers have id 0 and keep
+		 * pruning unconditionally.
+		 */
+		return check_ids(rold->id, rcur->id, idmap);
 	case PTR_TO_INSN:
 		return memcmp(rold, rcur, offsetof(struct bpf_reg_state, var_off)) == 0 &&
 		       range_within(rold, rcur) && tnum_in(rold->var_off, rcur->var_off);
