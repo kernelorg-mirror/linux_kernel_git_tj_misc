@@ -238,6 +238,11 @@
 #define A64_ADD(sf, Rd, Rn, Rm)  A64_ADDSUB_SREG(sf, Rd, Rn, Rm, ADD)
 #define A64_SUB(sf, Rd, Rn, Rm)  A64_ADDSUB_SREG(sf, Rd, Rn, Rm, SUB)
 #define A64_SUBS(sf, Rd, Rn, Rm) A64_ADDSUB_SREG(sf, Rd, Rn, Rm, SUB_SETFLAGS)
+/* Rd = Rn + (u32)Rm, add/subtract (extended register) */
+#define A64_ADD_UXTW(Rd, Rn, Rm) \
+	aarch64_insn_gen_add_sub_extended_reg(Rd, Rn, Rm, \
+		AARCH64_INSN_EXTEND_UXTW, 0, AARCH64_INSN_VARIANT_64BIT, \
+		AARCH64_INSN_ADSB_ADD)
 /* Rd = -Rm */
 #define A64_NEG(sf, Rd, Rm) A64_SUB(sf, Rd, A64_ZR, Rm)
 /* Rn - Rm; set condition flags */
