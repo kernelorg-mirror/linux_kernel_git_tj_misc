@@ -3432,7 +3432,7 @@ __weak u64 bpf_arena_get_kern_vm_start(struct bpf_arena *arena)
 
 #ifdef CONFIG_BPF_SYSCALL
 __weak bool bpf_arena_handle_page_fault(unsigned long addr, bool is_write,
-					unsigned long fault_ip)
+					unsigned long fault_ip, unsigned long ret_ip)
 {
 	return false;
 }

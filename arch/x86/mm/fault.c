@@ -698,7 +698,8 @@ page_fault_oops(struct pt_regs *regs, unsigned long error_code,
 	if (!(error_code & X86_PF_PROT)) {
 		if (kfence_handle_page_fault(address, error_code & X86_PF_WRITE, regs))
 			return;
-		if (bpf_arena_handle_page_fault(address, error_code & X86_PF_WRITE, regs->ip))
+		if (bpf_arena_handle_page_fault(address, error_code & X86_PF_WRITE,
+						regs->ip, 0))
 			return;
 	}
 

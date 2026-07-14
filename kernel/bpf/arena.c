@@ -1142,21 +1142,44 @@ static void __bpf_prog_report_arena_violation(struct bpf_prog *prog, bool write,
 	}));
 }
 
-bool bpf_arena_handle_page_fault(unsigned long addr, bool is_write, unsigned long fault_ip)
+bool bpf_arena_handle_page_fault(unsigned long addr, bool is_write, unsigned long fault_ip,
+				 unsigned long ret_ip)
 {
+	struct bpf_prog *hint_prog = NULL;
 	struct bpf_arena *arena;
 	struct bpf_prog *prog;
 	unsigned long kbase;
 	unsigned long page_addr = addr & PAGE_MASK;
+	bool handled = false;
 
 	prog = bpf_prog_find_from_stack();
+
+	/*
+	 * A fault in a leaf function can be invisible to the stack walk: the
+	 * leaf has no frame record, so a frame-record unwinder steps from the
+	 * exception boundary straight to the JITed prog's caller. The return
+	 * address register passed in by the arch is then the only link to the
+	 * prog. It can also be stale, so pin the prog it resolves to and rely
+	 * on the arena range check below to reject mismatches.
+	 */
+	if (!prog && ret_ip) {
+		rcu_read_lock();
+		prog = bpf_prog_ksym_find(ret_ip);
+		if (prog) {
+			hint_prog = bpf_prog_inc_not_zero(prog->aux->main_prog_aux->prog);
+			if (IS_ERR(hint_prog))
+				hint_prog = NULL;
+			prog = hint_prog;
+		}
+		rcu_read_unlock();
+	}
 	if (!prog)
 		return false;
 
 	arena = prog->aux->arena;
 	/* a prog not using arena may be on stack, so arena can be NULL */
 	if (!arena)
-		return false;
+		goto out;
 
 	kbase = bpf_arena_get_kern_vm_start(arena);
 
@@ -1166,13 +1189,17 @@ bool bpf_arena_handle_page_fault(unsigned long addr, bool is_write, unsigned lon
 	 * a different bug class - leave it to the regular kernel oops path.
 	 */
 	if (page_addr < kbase || page_addr >= kbase + SZ_4G + GUARD_SZ / 2)
-		return false;
+		goto out;
 
 	apply_to_page_range(&init_mm, page_addr, PAGE_SIZE,
 			    apply_range_set_scratch_cb, arena->scratch_page);
 	flush_vmap_cache(page_addr, PAGE_SIZE);
 	__bpf_prog_report_arena_violation(prog, is_write, page_addr - kbase, fault_ip);
-	return true;
+	handled = true;
+out:
+	if (hint_prog)
+		bpf_prog_put(hint_prog);
+	return handled;
 }
 
 void bpf_prog_report_arena_violation(bool write, unsigned long addr, unsigned long fault_ip)

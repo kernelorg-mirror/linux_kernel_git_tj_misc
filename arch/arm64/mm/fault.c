@@ -440,7 +440,8 @@ static void __do_kernel_fault(unsigned long addr, unsigned long esr,
 		if (esr_fsc_is_translation_fault(esr)) {
 			if (kfence_handle_page_fault(addr, esr & ESR_ELx_WNR, regs))
 				return;
-			if (bpf_arena_handle_page_fault(addr, esr & ESR_ELx_WNR, regs->pc))
+			if (bpf_arena_handle_page_fault(addr, esr & ESR_ELx_WNR,
+							regs->pc, regs->regs[30]))
 				return;
 		}
 
