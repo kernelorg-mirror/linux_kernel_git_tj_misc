@@ -2358,6 +2358,11 @@ bool bpf_jit_supports_stack_args(void)
 	return true;
 }
 
+bool bpf_jit_supports_arena_args(void)
+{
+	return true;
+}
+
 void *bpf_arch_text_copy(void *dst, void *src, size_t len)
 {
 	if (!aarch64_insn_copy(dst, src, len))
@@ -2534,23 +2539,51 @@ static void clear_garbage(struct jit_ctx *ctx, int reg, int effective_bytes)
 static void save_args(struct jit_ctx *ctx, int bargs_off, int oargs_off,
 		      const struct btf_func_model *m,
 		      const struct arg_aux *a,
-		      bool for_call_origin, bool is_struct_ops)
+		      bool for_call_origin, bool is_struct_ops,
+		      const struct bpf_tramp_arena_args *aargs)
 {
 	int i;
 	int reg;
 	int doff;
 	int soff;
+	int slot;
 	int slots;
 	u8 tmp = bpf2a64[TMP_REG_1];
+	u8 base = bpf2a64[TMP_REG_2];
+
+	if (for_call_origin)
+		aargs = NULL;
+
+	/*
+	 * Arena ctx slots are converted to the arena pointer form on the
+	 * way in, tmp = (u32)(kaddr - kern_vm_start). The 32-bit
+	 * subtraction both truncates and clears the upper half, so the
+	 * stored value satisfies the JIT invariant for arena pointer
+	 * registers. A nullable slot preserves NULL, tested on the full
+	 * 64-bit kernel pointer.
+	 */
+	if (aargs)
+		emit_a64_mov_i(0, base, (u32)aargs->kern_vm_start, ctx);
 
 	/* store arguments to the stack for the bpf program, or restore
 	 * arguments from stack for the original function
 	 */
 	for (reg = 0; reg < a->regs_for_args; reg++) {
-		emit(for_call_origin ?
-		     A64_LDR64I(reg, A64_SP, bargs_off) :
-		     A64_STR64I(reg, A64_SP, bargs_off),
-		     ctx);
+		if (aargs && (aargs->slots & BIT(reg))) {
+			if (aargs->nullable_slots & BIT(reg)) {
+				emit(A64_MOV(1, tmp, reg), ctx);
+				emit(A64_CBZ(1, tmp, 2), ctx);
+				emit(A64_SUB(0, tmp, tmp, base), ctx);
+			} else {
+				emit(A64_SUB(0, tmp, reg, base), ctx);
+			}
+			emit(A64_STR64I(tmp, A64_SP, bargs_off), ctx);
+		} else {
+			emit(for_call_origin ?
+			     A64_LDR64I(reg, A64_SP, bargs_off) :
+			     A64_STR64I(reg, A64_SP, bargs_off),
+			     ctx);
+		}
 		bargs_off += 8;
 	}
 
@@ -2561,6 +2594,7 @@ static void save_args(struct jit_ctx *ctx, int bargs_off, int oargs_off,
 	 */
 	soff = is_struct_ops ? 16 : 32;
 	doff = (for_call_origin ? oargs_off : bargs_off);
+	slot = a->regs_for_args;
 
 	/* save on stack arguments */
 	for (i = a->args_in_regs; i < m->nr_args; i++) {
@@ -2573,9 +2607,15 @@ static void save_args(struct jit_ctx *ctx, int bargs_off, int oargs_off,
 			 */
 			if (slots == 0 && !for_call_origin)
 				clear_garbage(ctx, tmp, m->arg_size[i] % 8);
+			if (aargs && (aargs->slots & BIT(slot))) {
+				if (aargs->nullable_slots & BIT(slot))
+					emit(A64_CBZ(1, tmp, 2), ctx);
+				emit(A64_SUB(0, tmp, tmp, base), ctx);
+			}
 			emit(A64_STR64I(tmp, A64_SP, doff), ctx);
 			soff += 8;
 			doff += 8;
+			slot++;
 		}
 	}
 }
@@ -2638,6 +2678,8 @@ static int prepare_trampoline(struct jit_ctx *ctx, struct bpf_tramp_image *im,
 	bool is_struct_ops = is_struct_ops_tramp(fentry);
 	int cookie_off, cookie_cnt, cookie_bargs_off;
 	int fsession_cnt = bpf_fsession_cnt(tnodes);
+	struct bpf_tramp_arena_args aargs;
+	bool has_aargs;
 	u64 func_meta;
 
 	/* trampoline stack layout:
@@ -2671,6 +2713,8 @@ static int prepare_trampoline(struct jit_ctx *ctx, struct bpf_tramp_image *im,
 	 *                    [ ...               ]
 	 * SP + oargs_off     [ stack arg 1       ] for original func
 	 */
+
+	has_aargs = bpf_tramp_collect_arena_args(tnodes, flags, &aargs);
 
 	stack_size = 0;
 	oargs_off = stack_size;
@@ -2755,7 +2799,8 @@ static int prepare_trampoline(struct jit_ctx *ctx, struct bpf_tramp_image *im,
 	store_func_meta(ctx, func_meta, func_meta_off);
 
 	/* save args for bpf */
-	save_args(ctx, bargs_off, oargs_off, m, a, false, is_struct_ops);
+	save_args(ctx, bargs_off, oargs_off, m, a, false, is_struct_ops,
+		  has_aargs ? &aargs : NULL);
 
 	/* save callee saved registers */
 	emit(A64_STR64I(A64_R(19), A64_SP, regs_off), ctx);
@@ -2804,7 +2849,8 @@ static int prepare_trampoline(struct jit_ctx *ctx, struct bpf_tramp_image *im,
 
 	if (flags & BPF_TRAMP_F_CALL_ORIG) {
 		/* save args for original func */
-		save_args(ctx, bargs_off, oargs_off, m, a, true, is_struct_ops);
+		save_args(ctx, bargs_off, oargs_off, m, a, true, is_struct_ops,
+			  NULL);
 		/* call original func */
 		emit(A64_LDR64I(A64_R(10), A64_SP, retaddr_off), ctx);
 		emit(A64_ADR(A64_LR, AARCH64_INSN_SIZE * 2), ctx);
